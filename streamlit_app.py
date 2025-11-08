@@ -307,12 +307,73 @@ def overlay_img() -> Image.Image:
     return img.convert("RGB")
 
 # ---------- FRAGMENT: click capture (only this area re-renders on click) ----------
+# --- replace your existing click_panel() and click handling with this ---
+
 @st.fragment
 def click_panel():
-    overlay_rgb_local = overlay_img()
-    return streamlit_image_coordinates(overlay_rgb_local, width=overlay_rgb_local.size[0], key="click")
+    """Draw once, capture click, update state, and redraw immediately
+    inside the fragment (no st.rerun). Returns the latest click dict.
+    """
+    # first draw
+    img1 = overlay_img()
+    click = streamlit_image_coordinates(img1, width=img1.size[0], key="click")
 
+    # on a new click, update state AND show the updated image right away
+    if click and "x" in click and "y" in click:
+        p = (float(click["x"]), float(click["y"]))
+        t = st.session_state.tool
+
+        # ---- same logic you already have, just no st.rerun() ----
+        if t == "Osteotomy":
+            if not st.session_state.poly_closed:
+                if len(st.session_state.poly) >= 3:
+                    x0,y0 = st.session_state.poly[0]
+                    if (p[0]-x0)**2 + (p[1]-y0)**2 <= 10**2:
+                        st.session_state.poly_closed = True
+                    else:
+                        st.session_state.poly.append(p)
+                else:
+                    st.session_state.poly.append(p)
+
+        elif t == "Prox axis":
+            L = st.session_state.prox_axis
+            if len(L) < 1: st.session_state.prox_axis = [p]
+            elif len(L) == 1: st.session_state.prox_axis.append(p)
+            else: st.session_state.prox_axis = [p]
+
+        elif t == "Dist axis":
+            L = st.session_state.dist_axis
+            if len(L) < 1: st.session_state.dist_axis = [p]
+            elif len(L) == 1: st.session_state.dist_axis.append(p)
+            else: st.session_state.dist_axis = [p]
+
+        elif t == "Prox joint":
+            L = st.session_state.prox_joint
+            if len(L) < 1: st.session_state.prox_joint = [p]
+            elif len(L) == 1: st.session_state.prox_joint.append(p)
+            else: st.session_state.prox_joint = [p]
+
+        elif t == "Dist joint":
+            L = st.session_state.dist_joint
+            if len(L) < 1: st.session_state.dist_joint = [p]
+            elif len(L) == 1: st.session_state.dist_joint.append(p)
+            else: st.session_state.dist_joint = [p]
+
+        elif t == "HINGE":
+            st.session_state.hinge = p
+        elif t == "CORA":
+            st.session_state.cora = p
+
+        # draw again immediately to show the new node/line without any rerun
+        img2 = overlay_img()
+        st.image(img2, width=img2.size[0])
+
+    return click
+
+# use it:
 click = click_panel()
+
+# IMPORTANT: remove your old "if click: ... st.rerun()" block entirely
 
 # --- snappy click handling ---
 if click and "x" in click and "y" in click:
