@@ -33,8 +33,10 @@ def centroid(pts: List[Pt]) -> Optional[Pt]:
     a*=0.5
     return None if abs(a)<1e-9 else (cx/(6*a), cy/(6*a))
 
-def apply_affine_fragment(moving: Image.Image, dx: float, dy: float, rot_deg: float, center_xy: Pt) -> Image.Image:
-    rot = moving.rotate(rot_deg, resample=Image.BICUBIC, center=center_xy, expand=False)  # CCW in y-down
+def apply_affine_fragment(moving: Image.Image, dx: float, dy: float, rot_deg: float, center_xy: Pt, quality="fast") -> Image.Image:
+    # CCW in y-down screen coords. Use faster resample during motion.
+    resample = Image.BILINEAR if quality=="fast" else Image.BICUBIC
+    rot = moving.rotate(rot_deg, resample=resample, center=center_xy, expand=False)
     out = Image.new("RGBA", moving.size, (0,0,0,0))
     out.alpha_composite(rot, (int(round(dx)), int(round(dy))))
     return out
@@ -72,29 +74,19 @@ def line_intersection(l1: Line, l2: Line) -> Optional[Pt]:
     py=((x1*y2-y1*x2)*(y3-y4)-(y1-y2)*(x3*y4-y3*x4))/den
     return (px,py)
 
-def _dir_from_inter(line: Line, inter: Pt) -> Pt:
-    # choose the farther endpoint for a stable direction
-    a=_vec(inter, line[0]); b=_vec(inter, line[1])
-    if _norm(a) >= _norm(b): v=a
-    else: v=b
-    n=_norm(v)
-    return (0.0,0.0) if n==0 else (v[0]/n, v[1]/n)
-
 def _angle_screen(v: Pt) -> float:
-    # screen coords: x to the right, y down; atan2 expects (y,x) with sign flip on y
-    return math.degrees(math.atan2(-v[1], v[0])) % 360.0
+    return math.degrees(math.atan2(-v[1], v[0])) % 360.0  # y-down
 
 def _sector_bisector(v: Pt, w: Pt) -> Pt:
-    # Internal bisector for the sector between two unit rays v -> w (adjacent in angle order)
     cand = (v[0]+w[0], v[1]+w[1])
-    if _norm(cand) < 1e-6:  # nearly opposite; fall back to the other bisector
+    if _norm(cand) < 1e-6:
         cand = (v[0]-w[0], v[1]-w[1])
     n=_norm(cand)
     return (cand[0]/n, cand[1]/n) if n>0 else (0.0,0.0)
 
 def _sector_angle_deg(v: Pt, w: Pt) -> float:
     dot = max(-1.0, min(1.0, v[0]*w[0] + v[1]*w[1]))
-    return math.degrees(math.acos(dot))  # always 0..180 for adjacent rays
+    return math.degrees(math.acos(dot))  # 0..180
 
 def bubble(d: ImageDraw.ImageDraw, anchor: Pt, text: str):
     pad=4
@@ -103,13 +95,30 @@ def bubble(d: ImageDraw.ImageDraw, anchor: Pt, text: str):
     d.rectangle([bx0,by0,bx1,by1], fill=(0,0,0,170))
     d.text((bx0+pad, by0+2), text, fill=(255,255,255,230))
 
-# ---------- cache resized preview ----------
+# ---------- caches ----------
 @st.cache_data(show_spinner=False)
 def _resize_for_display(img_bytes_hash: str, target_w: int, raw_bytes: bytes) -> Image.Image:
     pil = load_rgba(raw_bytes)
     W,H = pil.size
     scale = min(target_w/float(W), 1.0)
     return pil.resize((int(round(W*scale)), int(round(H*scale))), Image.NEAREST)
+
+@st.cache_data(show_spinner=False)
+def _build_layers(disp_key: str, disp_size: Tuple[int,int], poly_tuple: tuple, disp_png: bytes):
+    """
+    Build polygon mask + prox/dist split layers from the display image (bytes) and polygon.
+    disp_key: a stable key (e.g., hash+width) to avoid rework across reruns.
+    """
+    # Rebuild PIL from bytes
+    disp = Image.open(io.BytesIO(disp_png)).convert("RGBA")
+    m = polygon_mask(disp.size, list(poly_tuple))
+    inv = ImageOps.invert(m)
+    prox = Image.new("RGBA", disp.size, (0,0,0,0)); prox.paste(disp, (0,0), inv)
+    dist = Image.new("RGBA", disp.size, (0,0,0,0)); dist.paste(disp, (0,0), m)
+    return prox, dist
+
+def pil_to_png_bytes(img: Image.Image) -> bytes:
+    b = io.BytesIO(); img.save(b, format="PNG"); return b.getvalue()
 
 # ---------------- state ----------------
 ss = st.session_state
@@ -127,7 +136,7 @@ defaults = dict(
 for k,v in defaults.items(): ss.setdefault(k, v)
 
 # ---------------- sidebar ----------------
-st.sidebar.title("Osteotomy Visualizer")
+st.sidebar.title("Osteotomy visualizer")
 st.sidebar.caption("by **Nath Adulkasem, MD, PhD**")
 st.sidebar.caption("Department of Orthopaedic Surgery,\nFaculty of Medicine Siriraj Hospital,\nMahidol University, Thailand")
 
@@ -148,7 +157,7 @@ if ss.show_manual:
         "6) **Osteotomy**: click to add nodes; click near the first node to close.\n"
         "7) **HINGE/CORA**: click to set rotation center (else centroid is used).\n"
         "8) Use **ΔX/ΔY/Rotate** to move the chosen segment; the corresponding axes/joint lines move with it.\n"
-        "Tip: click the **Delete selected** control to clear just one line."
+        "Tip: use **Delete selected** to clear just one line."
     )
 
 ss.tool = st.sidebar.radio(
@@ -180,10 +189,14 @@ probe_img = load_rgba(up.getvalue()) if up else None
 ss.dispw = safe_width_slider(ss.dispw, probe_img)
 
 st.sidebar.markdown("---")
-# motion ranges (tightened)
-ss.dx    = st.sidebar.slider("ΔX (⟂ prox axis)  px", -200, 200, ss.dx, 1)
-ss.dy    = st.sidebar.slider("ΔY (∥ prox axis) px", -200, 200, ss.dy, 1)
-ss.theta = st.sidebar.slider("Rotate (°)", -60.0, 60.0, float(ss.theta), 0.2)
+# motion sliders in a form (apply on release)
+with st.sidebar.form("motion"):
+    dx_new    = st.slider("ΔX (⟂ prox axis)  px", -200, 200, ss.dx, 1)
+    dy_new    = st.slider("ΔY (∥ prox axis) px", -200, 200, ss.dy, 1)
+    theta_new = st.slider("Rotate (°)", -60.0, 60.0, float(ss.theta), 0.2)
+    apply_motion = st.form_submit_button("Apply motion")
+if apply_motion:
+    ss.dx, ss.dy, ss.theta = dx_new, dy_new, theta_new
 
 # ---------------- main ----------------
 if not up:
@@ -192,6 +205,7 @@ if not up:
 
 raw_bytes = up.getvalue()
 disp = _resize_for_display(_hash_bytes(raw_bytes), ss.dispw, raw_bytes)
+disp_png = pil_to_png_bytes(disp)  # for cached layer builder
 
 # map sliders to screen axes (ΔY ∥ prox axis, ΔX ⟂ prox axis)
 def map_sliders_to_screen(dx_slider: float, dy_slider: float, prox_axis: Line) -> Tuple[float,float]:
@@ -202,24 +216,33 @@ def map_sliders_to_screen(dx_slider: float, dy_slider: float, prox_axis: Line) -
     return (dx_slider, dy_slider)
 
 dx_screen, dy_screen = map_sliders_to_screen(ss.dx, ss.dy, ss.prox_axis)
-
-# compose osteotomy
-composite = disp.copy()
 center_for_motion: Pt = ss.hinge or centroid(ss.poly) or (disp.size[0]/2.0, disp.size[1]/2.0)
 
+# Compose osteotomy using cached layers if polygon is closed
 if ss.poly_closed and len(ss.poly) >= 3:
-    m = polygon_mask(disp.size, ss.poly)
-    inv = ImageOps.invert(m)
-    prox = Image.new("RGBA", disp.size, (0,0,0,0)); prox.paste(disp, (0,0), inv)
-    dist = Image.new("RGBA", disp.size, (0,0,0,0)); dist.paste(disp, (0,0), m)
-    moving = dist if ss.move_segment=="distal" else prox
-    fixed  = prox if ss.move_segment=="distal" else dist
-    moved  = apply_affine_fragment(moving, dx_screen, dy_screen, ss.theta, center_for_motion)
-    base   = Image.new("RGBA", disp.size, (0,0,0,0))
-    base.alpha_composite(fixed); base.alpha_composite(moved)
-    composite = base
+    disp_key = f"{_hash_bytes(raw_bytes)}|{ss.dispw}"
+    prox_layer, dist_layer = _build_layers(disp_key, disp.size, tuple(map(tuple, ss.poly)), disp_png)
+    moving = dist_layer if ss.move_segment=="distal" else prox_layer
+    fixed  = prox_layer if ss.move_segment=="distal" else dist_layer
+    moved  = apply_affine_fragment(moving, dx_screen, dy_screen, ss.theta, center_for_motion, quality="fast")
+    composite = Image.new("RGBA", disp.size, (0,0,0,0))
+    composite.alpha_composite(fixed); composite.alpha_composite(moved)
+else:
+    composite = disp.copy()
 
-# overlay with four-angle bubbles
+# Lines that visually follow the moving fragment during preview
+def _transformed_lines_for_preview():
+    prox_axis = ss.prox_axis[:]; dist_axis = ss.dist_axis[:]
+    prox_joint = ss.prox_joint[:]; dist_joint = ss.dist_joint[:]
+    if ss.poly_closed and len(ss.poly) >= 3:
+        if ss.move_segment == "distal":
+            if len(dist_axis)==2:  dist_axis  = transform_line(dist_axis,  center_for_motion, dx_screen, dy_screen, ss.theta)
+            if len(dist_joint)==2: dist_joint = transform_line(dist_joint, center_for_motion, dx_screen, dy_screen, ss.theta)
+        else:
+            if len(prox_axis)==2:  prox_axis  = transform_line(prox_axis,  center_for_motion, dx_screen, dy_screen, ss.theta)
+            if len(prox_joint)==2: prox_joint = transform_line(prox_joint, center_for_motion, dx_screen, dy_screen, ss.theta)
+    return prox_axis, dist_axis, prox_joint, dist_joint
+
 def overlay_img() -> Image.Image:
     img = composite.convert("RGBA")
     d = ImageDraw.Draw(img, "RGBA")
@@ -232,17 +255,7 @@ def overlay_img() -> Image.Image:
         for p in ss.poly:
             d.ellipse([p[0]-4,p[1]-4,p[0]+4,p[1]+4], fill=(0,255,255,200))
 
-    # choose which lines to draw (moving segment follows image)
-    prox_axis = ss.prox_axis[:]; dist_axis = ss.dist_axis[:]
-    prox_joint = ss.prox_joint[:]; dist_joint = ss.dist_joint[:]
-
-    if ss.poly_closed and len(ss.poly) >= 3:
-        if ss.move_segment == "distal":
-            if len(dist_axis)==2:  dist_axis  = transform_line(dist_axis,  center_for_motion, dx_screen, dy_screen, ss.theta)
-            if len(dist_joint)==2: dist_joint = transform_line(dist_joint, center_for_motion, dx_screen, dy_screen, ss.theta)
-        else:
-            if len(prox_axis)==2:  prox_axis  = transform_line(prox_axis,  center_for_motion, dx_screen, dy_screen, ss.theta)
-            if len(prox_joint)==2: prox_joint = transform_line(prox_joint, center_for_motion, dx_screen, dy_screen, ss.theta)
+    prox_axis, dist_axis, prox_joint, dist_joint = _transformed_lines_for_preview()
 
     def _draw_line(line: Line, col):
         if len(line)>=1:
@@ -260,32 +273,26 @@ def overlay_img() -> Image.Image:
     def four_angle_bubbles(l1: Line, l2: Line, base_radius: int = 26):
         if len(l1)!=2 or len(l2)!=2: return
         inter = line_intersection(l1, l2)
-        if not inter:
-            return
-        # Build four rays (u1, -u1, u2, -u2) from intersection, then sort by polar angle
+        if not inter: return
+
         def _dir(line):
-            # prefer farther endpoint for direction
             a=_vec(inter, line[0]); b=_vec(inter, line[1])
             v = a if _norm(a) >= _norm(b) else b
             n=_norm(v);  return (0.0,0.0) if n==0 else (v[0]/n, v[1]/n)
+
         u1 = _dir(l1); u2 = _dir(l2)
-        rays = [u1, (-u1[0],-u1[0] and -u1[1] or 0.0), u2, (-u2[0],-u2[1])]
-        # correct tuple for -u1 creation
-        rays[1] = (-u1[0], -u1[1])
-        # sort by angle around the point (screen coords)
+        rays = [u1, (-u1[0], -u1[1]), u2, (-u2[0], -u2[1])]
         rays.sort(key=_angle_screen)
 
-        # sectors: adjacent ray pairs (cyclic)
         for i in range(4):
             v = rays[i]; w = rays[(i+1) % 4]
             if _norm(v)==0 or _norm(w)==0: continue
-            ang = _sector_angle_deg(v, w)            # 0..180 for this sector
-            b   = _sector_bisector(v, w)             # unit bisector pointing into the sector
-            r   = base_radius + i*8                  # stagger radii a bit to avoid overlap
+            ang = _sector_angle_deg(v, w)
+            b   = _sector_bisector(v, w)
+            r   = base_radius + i*8
             pos = (inter[0] + b[0]*r, inter[1] + b[1]*r)
             bubble(d, pos, f"{ang:.1f}°")
 
-    # Show four angles for each meaningful pair
     if len(prox_joint)==2 and len(prox_axis)==2: four_angle_bubbles(prox_joint, prox_axis)
     if len(dist_joint)==2 and len(dist_axis)==2: four_angle_bubbles(dist_joint, dist_axis)
     if len(prox_axis)==2 and len(dist_axis)==2:  four_angle_bubbles(prox_axis, dist_axis)
@@ -299,8 +306,13 @@ def overlay_img() -> Image.Image:
         x,y=ss.cora; d.ellipse([x-6,y-6,x+6,y+6], outline=(0,200,0,255), width=2)
     return img.convert("RGB")
 
-overlay_rgb = overlay_img()
-click = streamlit_image_coordinates(overlay_rgb, width=overlay_rgb.size[0], key="click")
+# ---------- FRAGMENT: click capture (only this area re-renders on click) ----------
+@st.fragment
+def click_panel():
+    overlay_rgb_local = overlay_img()
+    return streamlit_image_coordinates(overlay_rgb_local, width=overlay_rgb_local.size[0], key="click")
+
+click = click_panel()
 
 # --- snappy click handling ---
 if click and "x" in click and "y" in click:
@@ -336,6 +348,7 @@ if click and "x" in click and "y" in click:
         ss.hinge=p
     elif t == "CORA":
         ss.cora=p
+    # Only the fragment needs to refresh; but full rerun keeps state consistent.
     st.rerun()
 
 with st.expander("Status / help", expanded=False):
