@@ -1,5 +1,5 @@
-streamlit==1.36.0
-streamlit-drawable-canvas==0.9.3
-Pillow<10
-numpy<2
-protobuf<5
+streamlit>=1.37
+streamlit-drawable-canvas>=0.9.3
+numpy>=1.24
+matplotlib>=3.7
+Pillow>=10.0
