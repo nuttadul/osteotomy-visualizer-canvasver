@@ -155,6 +155,24 @@ MAP_TO_INTERNAL = {
     "HINGE": "HINGE",
     "CORA": "CORA",
 }
+# Map display label -> internal name that logic understands
+MAP_TO_INTERNAL = {
+    "Proximal joint orientation line": "Prox joint",
+    "Proximal axis": "Prox axis",
+    "Distal joint orientation line": "Dist joint",
+    "Distal axis": "Dist axis",
+    "Osteotomy polygon": "Osteotomy",
+    "HINGE": "HINGE",
+    "CORA": "CORA",
+}
+# Pick index based on previous internal tool
+internal_to_display = {v:k for k,v in MAP_TO_INTERNAL.items()}
+default_display = internal_to_display.get(ss.tool, "Osteotomy polygon")
+display_index = TOOL_LABELS.index(default_display)
+
+display_choice = st.sidebar.radio("Tool", TOOL_LABELS, index=display_index)
+tool = MAP_TO_INTERNAL[display_choice]
+ss.tool = tool  # store internal
 
 st.sidebar.markdown("**Delete a single item**")
 del_choice = st.sidebar.selectbox("(select to clear one)",
