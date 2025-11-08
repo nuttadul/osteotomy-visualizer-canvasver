@@ -2,6 +2,8 @@
 import os
 import io
 import types
+import tempfile
+from uuid import uuid4
 import numpy as np
 import streamlit as st
 from PIL import Image
@@ -23,11 +25,14 @@ with st.sidebar:
     st.markdown("### Load image")
     uploaded = st.file_uploader("Choose an image", type=["png", "jpg", "jpeg"])
     if uploaded is not None:
-        # Save to a temp file and pass path to the original `load_img`
-        tmp_path = os.path.join(st.experimental_user, "tmp_upload_image.png") if hasattr(st, "experimental_user") else "tmp_upload_image.png"
+        # Create a safe temp directory and write the upload
+        tmp_dir = Path(tempfile.gettempdir()) / "st_ilizarov_uploads"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        ext = (uploaded.name.split(".")[-1].lower() if "." in uploaded.name else "png")
+        tmp_path = tmp_dir / f"{uuid4().hex}.{ext}"
         img = Image.open(uploaded).convert("RGB")
-        img.save(tmp_path)
-        sim.load_img(tmp_path)
+        img.save(tmp_path.as_posix())
+        sim.load_img(tmp_path.as_posix())
 
     st.markdown("---")
     st.markdown("### Mode buttons")
@@ -73,8 +78,7 @@ with right:
     if hasattr(sim, "img") and sim.img is not None:
         # Build a background image for the canvas from the loaded image
         try:
-            import matplotlib.pyplot as plt
-            # sim.img is likely a numpy array (h,w,3) or (h,w); normalize to RGB
+            import numpy as np
             arr = sim.img
             if arr.ndim == 2:
                 arr = np.stack([arr]*3, axis=-1)
@@ -97,23 +101,17 @@ with right:
         key="canvas",
     )
 
-    # Map last pointer position to image coordinates and send to original callbacks
-    # We emulate Matplotlib events with a tiny object exposing xdata/ydata
     class _Evt:
         def __init__(self, x, y):
             self.xdata = x
             self.ydata = y
-            # For compatibility with potential attributes in the original handlers
             self.inaxes = True
 
-    # Try to infer a single click from the canvas JSON (drag/transform center)
     if canvas_result.json_data is not None and len(canvas_result.json_data.get("objects", [])) > 0:
-        # Use the first object's center as a "move" pointer demo (best-effort)
         try:
             obj = canvas_result.json_data["objects"][-1]
             cx = obj.get("left", canvas_size/2) + obj.get("width", 0)/2
             cy = obj.get("top", canvas_size/2) + obj.get("height", 0)/2
-            # Convert canvas coords to image coords
             if hasattr(sim, "img") and sim.img is not None:
                 H, W = sim.img.shape[:2]
                 x_img = cx / canvas_size * W
@@ -122,13 +120,11 @@ with right:
                 x_img, y_img = cx, cy
 
             evt = _Evt(x_img, y_img)
-            # Forward as both move and click to approximate interaction
             sim.on_move(evt)
             if st.button("Send as click at ({:.1f}, {:.1f})".format(x_img, y_img)):
                 sim.on_click(evt)
         except Exception as e:
             st.info(f"Pointer mapping error: {e}")
 
-# Small status line
 if hasattr(sim, "status_txt"):
     st.caption(getattr(sim, "status_txt", ""))
