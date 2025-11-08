@@ -162,8 +162,8 @@ if ss.show_manual:
 
 ss.tool = st.sidebar.radio(
     "Tool",
-    ["Osteotomy","Prox axis","Dist axis","Prox joint","Dist joint","HINGE","CORA"],
-    index=["Osteotomy","Prox axis","Dist axis","Prox joint","Dist joint","HINGE","CORA"].index(ss.tool),
+   ["Prox joint”,”Prox axis”,”Dist joint”, Dist axis”,”Osteotomy”,”HINGE”,”CORA”],
+    index=["Prox joint”,”Prox axis”,”Dist joint”, Dist axis”,”Osteotomy”,”HINGE”,”CORA”].index(ss.tool),
 )
 
 st.sidebar.markdown("**Delete a single item**")
