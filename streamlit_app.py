@@ -378,4 +378,4 @@ Use sliders for translation (ΔX = ⟂ to proximal axis, ΔY = ∥ to proximal a
 ### 6) Editing & Reset
 Use the **Delete selected item** dropdown to clear a single line.  
 Reset buttons clear polygons, axes, joints, or points as needed.
-""")tual sectors.")
+""")
