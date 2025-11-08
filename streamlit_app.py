@@ -18,6 +18,8 @@ st.set_page_config(page_title="Ilizarov 2D (Streamlit Port)", layout="wide")
 # --- Session State: persistent simulator instance ---
 if "sim" not in st.session_state:
     st.session_state.sim = engine.IlizarovSim2D()
+if "last_obj_count" not in st.session_state:
+    st.session_state.last_obj_count = 0
 
 sim = st.session_state.sim
 
@@ -73,22 +75,39 @@ with left:
 
 # Canvas for pointer input (clicks)
 with right:
-    st.markdown("#### Pointer input")
-    canvas_size = 512
+    st.markdown("#### Click on image")
+    canvas_size = 768  # bigger target for precision
     bg = None
+    H = W = None
     if hasattr(sim, "img") and sim.img is not None:
-        # Build a background image for the canvas from the loaded image
         try:
-            import numpy as np
             arr = sim.img
             if arr.ndim == 2:
                 arr = np.stack([arr]*3, axis=-1)
             arr = arr.astype("uint8")
+            H, W = arr.shape[:2]
             bg = Image.fromarray(arr)
-            if bg.width != canvas_size or bg.height != canvas_size:
-                bg = bg.resize((canvas_size, canvas_size))
+            # Fit within square while preserving aspect ratio
+            if W >= H:
+                new_w = canvas_size
+                new_h = int(H * canvas_size / W)
+            else:
+                new_h = canvas_size
+                new_w = int(W * canvas_size / H)
+            bg = bg.resize((new_w, new_h))
+            pad_w = canvas_size - new_w
+            pad_h = canvas_size - new_h
+            # Create a padded background so coordinates stay simple
+            padded = Image.new("RGB", (canvas_size, canvas_size), (0,0,0))
+            padded.paste(bg, (pad_w//2, pad_h//2))
+            bg = padded
+            disp_w, disp_h = new_w, new_h
+            off_x, off_y = pad_w//2, pad_h//2
         except Exception:
             bg = None
+            disp_w = disp_h = off_x = off_y = 0
+    else:
+        disp_w = disp_h = off_x = off_y = 0
 
     canvas_result = st_canvas(
         fill_color="rgba(0,0,0,0)",
@@ -98,8 +117,9 @@ with right:
         update_streamlit=True,
         height=canvas_size,
         width=canvas_size,
-        drawing_mode="transform",
+        drawing_mode="point",
         key="canvas",
+        point_display_radius=2,
     )
 
     class _Evt:
@@ -108,24 +128,36 @@ with right:
             self.ydata = y
             self.inaxes = True
 
-    if canvas_result.json_data is not None and len(canvas_result.json_data.get("objects", [])) > 0:
+    # Auto-dispatch click when a new point is added
+    obj_count = 0
+    if canvas_result.json_data is not None:
+        obj_count = len(canvas_result.json_data.get("objects", []))
+
+    if obj_count > st.session_state.last_obj_count and obj_count > 0:
         try:
             obj = canvas_result.json_data["objects"][-1]
-            cx = obj.get("left", canvas_size/2) + obj.get("width", 0)/2
-            cy = obj.get("top", canvas_size/2) + obj.get("height", 0)/2
-            if hasattr(sim, "img") and sim.img is not None:
-                H, W = sim.img.shape[:2]
-                x_img = cx / canvas_size * W
-                y_img = cy / canvas_size * H
+            # Canvas coordinates
+            cx = obj.get("left", canvas_size/2) + obj.get("radius", 0)
+            cy = obj.get("top", canvas_size/2) + obj.get("radius", 0)
+
+            # Convert from displayed padded canvas back to original image coords
+            if H and W and disp_w and disp_h is not None:
+                # Remove padding offset
+                cx_unpad = max(0, min(canvas_size, cx - off_x))
+                cy_unpad = max(0, min(canvas_size, cy - off_y))
+                # Scale to image space
+                x_img = cx_unpad / (disp_w if disp_w else 1) * W
+                y_img = cy_unpad / (disp_h if disp_h else 1) * H
             else:
                 x_img, y_img = cx, cy
 
             evt = _Evt(x_img, y_img)
             sim.on_move(evt)
-            if st.button("Send as click at ({:.1f}, {:.1f})".format(x_img, y_img)):
-                sim.on_click(evt)
+            sim.on_click(evt)
         except Exception as e:
-            st.info(f"Pointer mapping error: {e}")
+            st.info(f"Click mapping error: {e}")
+
+        st.session_state.last_obj_count = obj_count
 
 if hasattr(sim, "status_txt"):
     st.caption(getattr(sim, "status_txt", ""))
