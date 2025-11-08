@@ -134,14 +134,7 @@ st.sidebar.caption("Department of Orthopaedic Surgery,\nFaculty of Medicine Siri
 st.sidebar.header("Load image")
 up = st.sidebar.file_uploader(" ", type=["png","jpg","jpeg","tif","tiff"])
 
-# Manual button
 
-
-ss.tool = st.sidebar.radio(
-    "Tool",
-    ["Osteotomy","Prox axis","Dist axis","Prox joint","Dist joint","HINGE","CORA"],
-    index=["Osteotomy","Prox axis","Dist axis","Prox joint","Dist joint","HINGE","CORA"].index(ss.tool),
-)
 # Desired display names & order
 TOOL_LABELS = [
     "Proximal joint orientation line",
