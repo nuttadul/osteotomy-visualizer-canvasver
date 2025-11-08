@@ -9,6 +9,7 @@ import numpy as np
 import streamlit as st
 from PIL import Image
 from streamlit_drawable_canvas import st_canvas
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 
 # Import the original code WITHOUT modification
 import engine  # engine.py placed alongside this file
@@ -28,7 +29,6 @@ with st.sidebar:
     st.markdown("### Load image")
     uploaded = st.file_uploader("Choose an image", type=["png", "jpg", "jpeg"])
     if uploaded is not None:
-        # Create a safe temp directory and write the upload
         tmp_dir = Path(tempfile.gettempdir()) / "st_ilizarov_uploads"
         tmp_dir.mkdir(parents=True, exist_ok=True)
         ext = (uploaded.name.split(".")[-1].lower() if "." in uploaded.name else "png")
@@ -64,100 +64,87 @@ with st.sidebar:
     theta = st.slider("θ", min_value=-180.0, max_value=180.0, step=0.1, value=0.0, key="theta_slider")
     sim.on_slide(theta)
 
-# --- Main area: canvas and figure display ---
-left, right = st.columns([1,1], gap="large")
+# --- Single interactive canvas that mirrors the current view ---
+canvas_size = 900  # large interactive area
 
-# Draw to matplotlib figure using the existing redraw
-with left:
-    st.markdown("#### View")
-    sim.redraw()
-    st.pyplot(sim.fig, use_container_width=True)
+# Redraw using the engine and convert the Matplotlib figure to an image used as canvas background
+sim.redraw()
+canvas = FigureCanvas(sim.fig)
+canvas.draw()
+w, h = sim.fig.canvas.get_width_height()
+buf = np.frombuffer(sim.fig.canvas.buffer_rgba(), dtype=np.uint8)
+rgba = buf.reshape(h, w, 4)
+bg_img = Image.fromarray(rgba).convert("RGB")
 
-# Canvas for pointer input (clicks)
-with right:
-    st.markdown("#### Click on image")
-    canvas_size = 768  # bigger target for precision
-    bg = None
-    H = W = None
-    if hasattr(sim, "img") and sim.img is not None:
-        try:
-            arr = sim.img
-            if arr.ndim == 2:
-                arr = np.stack([arr]*3, axis=-1)
-            arr = arr.astype("uint8")
-            H, W = arr.shape[:2]
-            bg = Image.fromarray(arr)
-            # Fit within square while preserving aspect ratio
-            if W >= H:
-                new_w = canvas_size
-                new_h = int(H * canvas_size / W)
-            else:
-                new_h = canvas_size
-                new_w = int(W * canvas_size / H)
-            bg = bg.resize((new_w, new_h))
-            pad_w = canvas_size - new_w
-            pad_h = canvas_size - new_h
-            # Create a padded background so coordinates stay simple
-            padded = Image.new("RGB", (canvas_size, canvas_size), (0,0,0))
-            padded.paste(bg, (pad_w//2, pad_h//2))
-            bg = padded
-            disp_w, disp_h = new_w, new_h
-            off_x, off_y = pad_w//2, pad_h//2
-        except Exception:
-            bg = None
-            disp_w = disp_h = off_x = off_y = 0
-    else:
-        disp_w = disp_h = off_x = off_y = 0
+# Pad the figure to square for the canvas while preserving aspect ratio
+if w >= h:
+    new_w = canvas_size
+    new_h = int(h * canvas_size / w)
+else:
+    new_h = canvas_size
+    new_w = int(w * canvas_size / h)
+bg_resized = bg_img.resize((new_w, new_h))
+pad_w = canvas_size - new_w
+pad_h = canvas_size - new_h
+padded = Image.new("RGB", (canvas_size, canvas_size), (0,0,0))
+padded.paste(bg_resized, (pad_w//2, pad_h//2))
+bg_for_canvas = padded
+disp_w, disp_h = new_w, new_h
+off_x, off_y = pad_w//2, pad_h//2
 
-    canvas_result = st_canvas(
-        fill_color="rgba(0,0,0,0)",
-        stroke_width=2,
-        stroke_color="#00FFFF",
-        background_image=bg,
-        update_streamlit=True,
-        height=canvas_size,
-        width=canvas_size,
-        drawing_mode="point",
-        key="canvas",
-        point_display_radius=2,
-    )
+st.markdown("#### Click directly on the image below")
+canvas_result = st_canvas(
+    fill_color="rgba(0,0,0,0)",
+    stroke_width=2,
+    stroke_color="#00FFFF",
+    background_image=bg_for_canvas,
+    update_streamlit=True,
+    height=canvas_size,
+    width=canvas_size,
+    drawing_mode="point",
+    key="canvas",
+    point_display_radius=2,
+)
 
-    class _Evt:
-        def __init__(self, x, y):
-            self.xdata = x
-            self.ydata = y
-            self.inaxes = True
+class _Evt:
+    def __init__(self, x, y):
+        self.xdata = x
+        self.ydata = y
+        self.inaxes = True
 
-    # Auto-dispatch click when a new point is added
-    obj_count = 0
-    if canvas_result.json_data is not None:
-        obj_count = len(canvas_result.json_data.get("objects", []))
+obj_count = 0
+if canvas_result.json_data is not None:
+    obj_count = len(canvas_result.json_data.get("objects", []))
 
-    if obj_count > st.session_state.last_obj_count and obj_count > 0:
-        try:
-            obj = canvas_result.json_data["objects"][-1]
-            # Canvas coordinates
-            cx = obj.get("left", canvas_size/2) + obj.get("radius", 0)
-            cy = obj.get("top", canvas_size/2) + obj.get("radius", 0)
+# When a new point is clicked on the canvas, map it back to image coords and forward to engine handlers
+if obj_count > st.session_state.last_obj_count and obj_count > 0:
+    try:
+        obj = canvas_result.json_data["objects"][-1]
+        cx = obj.get("left", canvas_size/2) + obj.get("radius", 0)
+        cy = obj.get("top", canvas_size/2) + obj.get("radius", 0)
 
-            # Convert from displayed padded canvas back to original image coords
-            if H and W and disp_w and disp_h is not None:
-                # Remove padding offset
-                cx_unpad = max(0, min(canvas_size, cx - off_x))
-                cy_unpad = max(0, min(canvas_size, cy - off_y))
-                # Scale to image space
-                x_img = cx_unpad / (disp_w if disp_w else 1) * W
-                y_img = cy_unpad / (disp_h if disp_h else 1) * H
-            else:
-                x_img, y_img = cx, cy
+        # Remove padding and scale back to the original figure size
+        cx_unpad = max(0, min(canvas_size, cx - off_x))
+        cy_unpad = max(0, min(canvas_size, cy - off_y))
+        x_fig = cx_unpad / (disp_w if disp_w else 1) * w
+        y_fig = cy_unpad / (disp_h if disp_h else 1) * h
 
-            evt = _Evt(x_img, y_img)
-            sim.on_move(evt)
-            sim.on_click(evt)
-        except Exception as e:
-            st.info(f"Click mapping error: {e}")
+        # Convert figure pixel to image pixel using sim.img dimensions (engine expects image space)
+        if hasattr(sim, "img") and sim.img is not None:
+            H, W = sim.img.shape[:2]
+            x_img = x_fig / (w if w else 1) * W
+            y_img = y_fig / (h if h else 1) * H
+        else:
+            x_img, y_img = x_fig, y_fig
 
-        st.session_state.last_obj_count = obj_count
+        evt = _Evt(x_img, y_img)
+        sim.on_move(evt)
+        sim.on_click(evt)
+    except Exception as e:
+        st.info(f"Click mapping error: {e}")
 
+    st.session_state.last_obj_count = obj_count
+
+# Optional status text from engine
 if hasattr(sim, "status_txt"):
     st.caption(getattr(sim, "status_txt", ""))
